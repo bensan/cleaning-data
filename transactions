@@ -1,0 +1,222 @@
+import numpy as np
+import pandas as pd
+import math
+from datetime import datetime
+
+requests_data = pd.read_csv("./data/consumer_requests.csv")
+requests_data.drop(requests_data.tail(5).index, inplace = True)
+# requests_data.drop(['Number of Adults', 'Number of Children'], axis = 1, inplace = True)
+requests_data.tail(10)
+
+line_item_data = pd.read_csv("./data/consumer_request_line_items.csv")
+line_item_data.drop(line_item_data.tail(5).index, inplace = True)
+line_item_data.drop(['Number of Adults', 'Number of Children'], axis = 1, inplace = True)
+
+# standardize on ticket promo code data values by filling na with empty strings
+line_item_data[['Ticket Promo Code']] = line_item_data[['Ticket Promo Code']].fillna(value = '')
+line_item_data[['Presence of Children Ages 0 18']] = line_item_data[['Presence of Children Ages 0 18']].fillna(value = '')
+line_item_data[['State/Province']] = line_item_data[['State/Province']].fillna(value = '')
+line_item_data[['Country']] = line_item_data[['Country']].fillna(value = '')
+
+line_item_data.tail(10)
+
+list(line_item_data)
+list(requests_data)
+
+# Determining the most recent transaction date
+recent_trans_total_data = line_item_data.groupby(['ID']).agg({
+    'Items Total': 'sum',
+})
+output_data = pd.DataFrame(data=recent_trans_total_data)
+
+# Number of transactions
+num_of_transactions = line_item_data.groupby('ID').agg({
+    'Consumer Request ID': 'nunique',
+})
+result = pd.merge(output_data, num_of_transactions, on = 'ID')
+
+num_of_people = requests_data.groupby('ID').agg({
+    'Number of Adults': 'sum',
+    'Number of Children': 'sum'
+})
+
+result = pd.merge(result, num_of_people, on = 'ID')
+
+result.rename(columns = {'Consumer Request ID': 'Num Of Transactions'}, inplace=True)
+result.head(10)
+
+# Time between Account Creation and Buying (max)
+requests_data['Transaction Date'] = pd.to_datetime(requests_data['Transaction Date'])
+requests_data['Created Date'] = pd.to_datetime(requests_data['Created Date'])
+account_creation_buying = requests_data.groupby('ID').agg({
+    'Created Date': 'max',
+    'Transaction Date': 'max'
+})
+
+account_creation_buying['Age'] = (account_creation_buying['Transaction Date'] - account_creation_buying['Created Date']).dt.days
+
+# Merge results so far
+result = pd.merge(result, account_creation_buying, on = 'ID')
+
+result.rename(columns = {
+    'Created_Date_y': 'Created Date',
+    'Transaction_Date_y': 'Transaction Date',
+    'Age_y': 'Lead Age'
+}, inplace=True)
+
+result['same day'] = False
+result['within a week'] = False
+result['within a month'] = False
+result['within a year'] = False
+result['more than a year'] = False
+result.head(5)
+
+def calculate_time_gap(row):
+    ageInDays = row['Age']
+    str = ''
+    if(ageInDays <= 1):
+        row['same day'] = True
+    elif(ageInDays > 1 and ageInDays <= 7):
+        row['within a week'] = True
+    elif(ageInDays > 7 and ageInDays <= 30):
+        row['within a month'] = True
+    elif(ageInDays > 30 and ageInDays <= 365):
+        row['within a year'] = True
+    elif(ageInDays > 365):
+        row['more than a year'] = True
+    else:
+        row['no value'] = True
+    return row
+
+result = result.apply(lambda row: calculate_time_gap(row), axis = 1)
+
+# Drop useless columns
+result.drop([
+    'Created Date',
+    'Transaction Date',
+], axis = 1, inplace = True)
+
+line_item_data.loc[line_item_data["Product Family"] == '','Product Family'] = 'No value'
+
+def determine_product_mix(group, pma):
+    z = {
+        'ID': '',
+        'disney': False,
+        'universal': False,
+        'seaworld': False,
+        'other': False
+    }
+
+    z['ID'] = group.name
+
+    if any("Disney" in s for s in group):
+        z['disney'] = True
+    if any("Universal" in s for s in group):
+        z['universal'] = True
+    if any("SeaWorld" in s for s in group):
+        z['seaworld'] = True
+
+    for item in ['Disney', 'Universal', 'SeaWorld', 'Other']:
+        if any(s in item for s in group):
+            z['other'] = True
+        
+    # print z
+    pma.append(z)
+
+pma_meta = []
+line_item_data.groupby(['ID'])['Product Family'].apply(determine_product_mix, pma_meta)
+
+# Turn dictionary into Dataframe
+productMixDF = pd.DataFrame(pma_meta)
+
+# productMixDF.head(50)
+
+# Dealing with Promo Codes here
+def determine_promo_code_usage(group, promo_m):
+    z = {
+        'ID': '',
+        'used_promo_code': False,
+    }
+
+    z['ID'] = group.name
+    for item in group:
+        if item:
+            z['used_promo_code'] = True
+
+    promo_m.append(z)
+
+promo_meta = []
+line_item_data.groupby(['ID'])['Ticket Promo Code'].apply(determine_promo_code_usage, promo_meta)
+
+# Turn dictionary into Dataframe
+PromoCodeDF = pd.DataFrame(promo_meta)
+
+# Now let's take a look at the demo data, filter out the unique rows by ID
+
+demo_data = line_item_data.drop_duplicates(subset = ['ID'])
+demo_data.drop(['Consumer Request ID', 'Items Total', 'Consumer Request Line Item ID', 'Created Date', 'Transaction Date'], axis = 1, inplace = True)
+
+def is_fl(row):
+    if ((row['State/Province'] == 'FL') or (row['State/Province'] == 'fl')):
+        row['is_florida'] = True
+    else:
+        row['is_florida'] = False
+    return row
+
+
+def is_male(row):
+    if(row['Gender Summary'] is not np.nan):
+        if ('Male' in row['Gender Summary']):
+            row['is_male'] = True
+        else:
+            row['is_male'] = False
+    else:
+        row['is_male'] = False
+    return row
+
+def is_married(row):
+    if(row['Marital Status Summary'] is not np.nan):
+        if ('Married' in row['Marital Status Summary']):
+            row['is_married'] = True
+        else:
+            row['is_married'] = False
+    else:
+        row['is_married'] = False
+    return row
+
+def has_children(row):
+    if(row['Presence of Children Ages 0 18'] is not np.nan):
+        row['has_children'] = True
+    else:
+        row['has_children'] = False
+    return row
+
+demo_data = demo_data.apply(lambda row: is_fl(row), axis = 1)
+demo_data = demo_data.apply(lambda row: is_male(row), axis = 1)
+demo_data = demo_data.apply(lambda row: is_married(row), axis = 1)
+demo_data = demo_data.apply(lambda row: has_children(row), axis = 1)
+
+# Drop useless columns
+demo_data.drop([
+    'Ticket Promo Code',
+    'State/Province',
+    'Gender Summary',
+    'Product Family',
+    'Marital Status Summary',
+    'Children'
+], axis = 1, inplace = True)
+
+demo_data.rename(index = str, columns = {
+    'Estimated HH Income Summary': 'Household Income',
+    'Domestic Combined Age Summary': 'Combined Age',
+}, inplace=True)
+
+demo_data.head(5)
+
+mid_result = pd.merge(result, demo_data, how = 'left', copy = False, on = 'ID')
+final_result = pd.merge(mid_result, productMixDF, how = 'left', copy = False, on = 'ID')
+final_result_real = pd.merge(final_result, PromoCodeDF, how = 'left', copy = False, on = 'ID')
+final_result_real.head(50)
+
+# Export final file
+final_result.to_csv('./data/output_clean.csv', index = False)
